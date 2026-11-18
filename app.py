@@ -1,44 +1,37 @@
-import os,json,time,urllib.request,urllib.error
+import os,json,time,urllib.request
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
-PRIMARY="https://steep-hill-80b3daira.dnown11.workers.dev"
-ALLOWED=("/mcp","/.well-known/","/authorize","/token","/register","/oauth/")
-HOP={"host","connection","transfer-encoding","content-length","keep-alive","proxy-authenticate","proxy-authorization","te","trailer","upgrade","cf-connecting-ip","cf-ray"}
-class Handler(BaseHTTPRequestHandler):
- protocol_version="HTTP/1.0"
- def respond(self,code,obj):
-  b=json.dumps(obj).encode();self.send_response(code);self.send_header("Content-Type","application/json");self.send_header("Content-Length",str(len(b)));self.send_header("Cache-Control","no-store");self.end_headers();self.wfile.write(b)
- def do_GET(self):self.handle_request()
- def do_POST(self):self.handle_request()
- def do_OPTIONS(self):self.handle_request()
- def handle_request(self):
-  if self.path.split("?")[0] in ("/","/healthz","/primary-status"):
-   if self.path.split("?")[0]=="/healthz":return self.respond(200,{"service":"naqsha-render-gateway","alive":True,"gateway":True})
-   try:
-    with urllib.request.urlopen(PRIMARY+"/.well-known/oauth-authorization-server",timeout=9) as r:online=r.status==200
-   except Exception:online=False
-   return self.respond(200,{"service":"naqsha-render-gateway","primary_reachable":online,"independent_mcp":False,"gateway":True})
-  if not any(self.path.split("?")[0]==a or (a.endswith("/") and self.path.startswith(a)) for a in ALLOWED):return self.respond(404,{"error":"not_found"})
+START=time.monotonic()
+URLS={'cloudflare':'https://steep-hill-80b3daira.dnown11.workers.dev','render':'https://naqsha-mcp-backup-gateway.onrender.com'}
+def check():
+ out={}
+ for name,url in URLS.items():
   try:
-   length=int(self.headers.get("Content-Length","0"))
-   if length>10485760:return self.respond(413,{"error":"body_too_large"})
-   body=self.rfile.read(length) if length else None
-   headers={k:v for k,v in self.headers.items() if k.lower() not in HOP}
-   headers["Host"]="steep-hill-80b3daira.dnown11.workers.dev"
-   req=urllib.request.Request(PRIMARY+self.path,data=body,headers=headers,method=self.command)
-   try:r=urllib.request.urlopen(req,timeout=60)
-   except urllib.error.HTTPError as e:r=e
-   with r:
-    self.send_response(r.status)
-    for k,v in r.headers.items():
-     if k.lower() not in HOP and k.lower() not in ("content-encoding",):self.send_header(k,v)
-    self.send_header("Cache-Control","no-store")
-    self.end_headers()
-    while True:
-     chunk=r.read(16384)
-     if not chunk:break
-     self.wfile.write(chunk);self.wfile.flush()
-  except (BrokenPipeError,ConnectionResetError):pass
-  except Exception:return self.respond(502,{"error":"upstream_unavailable"})
+   with urllib.request.urlopen(url+'/.well-known/oauth-authorization-server',timeout=8) as r:out[name]={'status':r.status,'ok':r.status==200}
+  except Exception as e:out[name]={'ok':False,'error':type(e).__name__}
+ return out
+def status():return {'server':'naqsha-independent-mcp','independent':True,'phone_required':False,'uptime':int(time.monotonic()-START)}
+class Handler(BaseHTTPRequestHandler):
+ def sendj(self,n,obj):
+  b=json.dumps(obj).encode();self.send_response(n);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(b)));self.end_headers();self.wfile.write(b)
+ def do_GET(self):
+  if self.path in ('/','/healthz'):return self.sendj(200,status())
+  return self.sendj(405 if self.path=='/mcp' else 404,{'error':'use POST /mcp'})
+ def do_POST(self):
+  if self.path!='/mcp':return self.sendj(404,{'error':'not_found'})
+  try:
+   n=int(self.headers.get('Content-Length','0'))
+   if n<1 or n>65536:return self.sendj(413,{'error':'size'})
+   q=json.loads(self.rfile.read(n));m=q.get('method');i=q.get('id')
+   if m=='notifications/initialized':self.send_response(202);self.end_headers();return
+   if m=='initialize':r={'protocolVersion':'2025-03-26','capabilities':{'tools':{}},'serverInfo':{'name':'naqsha-independent-mcp','version':'1.0'}}
+   elif m=='ping':r={}
+   elif m=='tools/list':r={'tools':[{'name':x,'description':d,'inputSchema':{'type':'object','properties':{}}} for x,d in [('server_status','Independent server status'),('check_public_routes','Read-only public route diagnostics')]]}
+   elif m=='tools/call':
+    name=q.get('params',{}).get('name')
+    if name not in ('server_status','check_public_routes'):return self.sendj(200,{'jsonrpc':'2.0','id':i,'error':{'code':-32602,'message':'Unknown tool'}})
+    r={'content':[{'type':'text','text':json.dumps(status() if name=='server_status' else check())}]}
+   else:return self.sendj(200,{'jsonrpc':'2.0','id':i,'error':{'code':-32601,'message':'Method not found'}})
+   return self.sendj(200,{'jsonrpc':'2.0','id':i,'result':r})
+  except Exception:return self.sendj(400,{'error':'bad_request'})
  def log_message(self,*args):pass
-if __name__=="__main__":
- ThreadingHTTPServer(("0.0.0.0",int(os.getenv("PORT","10000"))),Handler).serve_forever()
+if __name__=='__main__':ThreadingHTTPServer(('0.0.0.0',int(os.getenv('PORT','10000'))),Handler).serve_forever()
