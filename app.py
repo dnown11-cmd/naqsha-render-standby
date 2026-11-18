@@ -1,6 +1,8 @@
-import os,json,time,urllib.request
+import os,json,time,threading,urllib.request
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 START=time.monotonic()
+STATE={'checked_at':0,'primary_ok':None,'consecutive_failures':0,'repair_recommended':False}
+LOCK=threading.Lock()
 URLS={'cloudflare':'https://steep-hill-80b3daira.dnown11.workers.dev','render':'https://naqsha-mcp-backup-gateway.onrender.com'}
 def check():
  out={}
@@ -9,12 +11,27 @@ def check():
    with urllib.request.urlopen(url+'/.well-known/oauth-authorization-server',timeout=8) as r:out[name]={'status':r.status,'ok':r.status==200}
   except Exception as e:out[name]={'ok':False,'error':type(e).__name__}
  return out
-def status():return {'server':'naqsha-independent-mcp','independent':True,'phone_required':False,'uptime':int(time.monotonic()-START)}
+def status():return {'server':'naqsha-independent-mcp','independent':True,'phone_required':False,'uptime':int(time.monotonic()-START),'primary_monitor':dict(STATE)}
+def watch():
+ while True:
+  try:
+   r=check();ok=bool(r.get('cloudflare',{}).get('ok'))
+   with LOCK:
+    STATE['checked_at']=int(time.time());STATE['primary_ok']=ok
+    STATE['consecutive_failures']=0 if ok else STATE['consecutive_failures']+1
+    STATE['repair_recommended']=STATE['consecutive_failures']>=2
+  except Exception:pass
+  time.sleep(60)
+threading.Thread(target=watch,daemon=True).start()
+
 class Handler(BaseHTTPRequestHandler):
  def sendj(self,n,obj):
   b=json.dumps(obj).encode();self.send_response(n);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(b)));self.end_headers();self.wfile.write(b)
  def do_GET(self):
   if self.path in ('/','/healthz'):return self.sendj(200,status())
+  if self.path=='/repair-plan':
+   with LOCK:st=dict(STATE)
+   return self.sendj(200,{'repair_recommended':st['repair_recommended'],'checked_at':st['checked_at'],'failures':st['consecutive_failures'],'actions':['check_local_mcp','restart_local_mcp_if_down','check_gateway','restart_gateway_if_down','check_failover_manager','restart_failover_if_down'],'note':'Only local Termux agent may execute repairs after its own verification'})
   return self.sendj(405 if self.path=='/mcp' else 404,{'error':'use POST /mcp'})
  def do_POST(self):
   if self.path!='/mcp':return self.sendj(404,{'error':'not_found'})
